@@ -1,0 +1,4 @@
+[wrap-git]
+url = https://github.com/fnc12/sqlite_orm.git
+revision = head
+

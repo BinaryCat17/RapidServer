@@ -1,0 +1,5 @@
+[wrap-git]
+url = https://github.com/ComradeStalin17/uWebSocketsMeson.git
+revision = head
+clone-recursive = true
+

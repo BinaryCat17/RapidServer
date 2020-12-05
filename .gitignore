@@ -1,0 +1,5 @@
+build
+.idea
+subprojects/sqlite_orm
+subprojects/uSocketsMeson
+subprojects/uWebSocketsMeson
