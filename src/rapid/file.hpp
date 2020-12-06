@@ -5,6 +5,7 @@
 #include <map>
 
 namespace rapid {
+    using namespace std;
     namespace fs = filesystem;
 
     template<typename T>
@@ -24,7 +25,7 @@ namespace rapid {
 
     private:
         fs::path mRoot;
-        mutable map<fs::path, string> mCache;
+        mutable std::map<fs::path, string> mCache;
     };
 
     template<>
@@ -33,8 +34,4 @@ namespace rapid {
             return e.file(f);
         }
     };
-
-
-
-
 }

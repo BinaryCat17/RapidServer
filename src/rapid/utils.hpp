@@ -3,9 +3,12 @@
 #include <iostream>
 #include <concepts>
 #include <vector>
+#include <filesystem>
+#include <string>
 
 namespace rapid {
     using namespace std;
+    namespace fs = std::filesystem;
 
     template<typename FnT, typename... Types>
     auto curry(FnT &&f, Types &&... values) {
@@ -48,6 +51,51 @@ namespace rapid {
         } else {
             auto item = c.emplace(v, f());
             return item.first->second;
+        }
+    }
+
+    template<template<typename> class ConT, typename T, typename FnT, typename R = invoke_result_t<FnT, T>>
+    requires (!is_same_v<R,void>)
+    auto map(ConT<T> const& cont, FnT && f) {
+        ConT<R> result;
+        for (auto& v : cont) {
+            result.push_back(v);
+        }
+        return result;
+    }
+
+    template<template<typename> class ConT, typename T, typename FnT, typename R = invoke_result_t<FnT, T>>
+    requires is_same_v<R,void>
+    auto map(ConT<T> const& cont, FnT && f) {
+        for (auto& v : cont) {
+            f(v);
+        }
+    }
+
+    template<template<typename> class ConT, typename T, typename FnT, typename R = invoke_result_t<FnT, T>>
+    requires (!is_same_v<R,void>)
+    auto map(ConT<T>& cont, FnT && f) {
+        ConT<R> result;
+        for (auto& v : cont) {
+            result.push_back(v);
+        }
+        return result;
+    }
+
+    template<template<typename> class ConT, typename T, typename FnT, typename R = invoke_result_t<FnT, T>>
+    requires is_same_v<R,void>
+    auto map(ConT<T>& cont, FnT && f) {
+        for (auto& v : cont) {
+            f(v);
+        }
+    }
+
+    template<typename FnT>
+    auto catchf(FnT && f) {
+        try {
+            return f();
+        } catch (exception const& e) {
+            cerr << e.what();
         }
     }
 }
