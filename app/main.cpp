@@ -2,6 +2,7 @@
 #include "rapid/file.hpp"
 #include "rapid/sockets.hpp"
 #include "rapid/user.hpp"
+#include "rapid/impl.hpp"
 
 using namespace std;
 
