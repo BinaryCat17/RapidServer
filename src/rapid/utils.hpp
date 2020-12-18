@@ -52,8 +52,8 @@ namespace rapid {
     struct Traits<void> {};
 
     template<typename FnT, typename T, typename... TT>
-    auto stream_cmd(FnT && f, T && v, Traits<TT...> traits) {
-        return stream(curry(f, v, traits));
+    auto stream_cmd(FnT && f, T && v) {
+        return stream(curry(f)(v));
     }
 
     template<typename Cont, typename VT, typename FnT>

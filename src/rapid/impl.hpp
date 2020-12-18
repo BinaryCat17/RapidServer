@@ -1,7 +1,6 @@
 #include "utils.hpp"
 #include <sqlite_orm/sqlite_orm.h>
 #include "sqliteUtils.hpp"
-#include "traits.hpp"
 #include <map>
 #include <concepts>
 #include <uWebSockets/App.h>
@@ -56,14 +55,10 @@ namespace rapid {
         using Response = uWS::HttpResponse<false> *;
         using Request = uWS::HttpRequest *;
         using UserData = optional<int>;
-
-
     }
 
     namespace storage {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        auto make(auto &&, Traits<T...>, filesystem::path const &root, string_view filename) {
+        auto make(filesystem::path const &root, string_view filename) {
             using namespace db;
             using namespace impl;
 
@@ -99,15 +94,11 @@ namespace rapid {
     }
 
     namespace impl {
-        using Storage = decay_t<decltype(storage::make(storage::Default {},
-            Traits<storage::Default> {}, "", ""))> *;
+        using Storage = decay_t<decltype(storage::make("", ""))> *;
     }
 
     namespace sign_control {
-        template<typename... T>
-        optional<int> sign_in(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
-            string_view pass) {
-            auto &s = static_cast<impl::Storage &>(v);
+        optional<int> sign_in(impl::Storage s, string_view name, string_view pass) {
             if (auto user = getByName<impl::User>(s, string(name))) {
                 if (user->password == pass) {
                     impl::Session session {.id = -1, .userId = user->id};
@@ -118,17 +109,13 @@ namespace rapid {
             }
         }
 
-        template<typename... T>
-        void sign_out(take_ref<impl::Storage> auto &&v, Traits<T...>, int session) {
-            auto &s = static_cast<impl::Storage &>(v);
+        void sign_out(impl::Storage s, int session) {
             s->remove<impl::Session>(session);
         }
     }
 
     namespace file_access {
-        template<typename... T>
-        bool can_read_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int user, int file) {
-            auto &s = static_cast<impl::Storage &>(v);
+        bool can_read_file(impl::Storage s, int user, int file) {
             using namespace impl;
             using namespace db;
 
@@ -141,40 +128,27 @@ namespace rapid {
             return isExists(*s, groupFile or userFile);
         }
 
-        template<typename... T>
-        void
-        give_user_access_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int user, int file) {
-            auto &s = static_cast<impl::Storage &>(v);
+        void give_user_access_file(impl::Storage s, int user, int file) {
             s->insert(impl::FileAccessUser {.fileId = file, .userId = user});
         }
 
-        template<typename... T>
-        void give_group_access_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int group,
-            int file) {
-            auto &s = static_cast<impl::Storage &>(v);
+        void give_group_access_file(impl::Storage s, int group, int file) {
             s->insert(impl::FileAccessGroup {.fileId = file, .groupId = group});
         }
     }
 
     namespace user_control {
-        template<typename... T>
-        optional<int> new_user(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
-            string_view password) {
-            auto &s = static_cast<impl::Storage &>(v);
+        optional<int> new_user(impl::Storage s, Traits<T...>, string_view name, string_view pass) {
             using namespace db;
 
             if (isExists(*s, is_equal(&impl::User::name, string(name)))) {
                 return {};
             }
 
-            return {s->insert(impl::User {-1, string(name), string(password)})};
+            return {s->insert(impl::User {-1, string(name), string(pass)})};
         }
 
-        template<typename... T>
-        optional<int>
-        add_user_group(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
-            string_view password) {
-            auto &s = static_cast<impl::Storage &>(v);
+        optional<int> add_user_group(impl::Storage s, string_view name, string_view password) {
             using namespace db;
 
             if (auto user = getByName<impl::User>(s, string(name))) {
@@ -188,109 +162,82 @@ namespace rapid {
     }
 
     namespace user_data {
-        template<typename... T>
-        impl::UserData const *get_user_data(take_ref<impl::Socket> auto &&v, Traits<T...>) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        impl::UserData const *get_user_data(impl::Socket s) {
             return reinterpret_cast<impl::UserData const *>(s->getUserData());
         }
 
         template<typename... T>
-        impl::UserData *get_mut_user_data(take_ref<impl::Socket> auto &&v, Traits<T...>) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        impl::UserData *get_mut_user_data(impl::Socket vs {
             return reinterpret_cast<impl::UserData *>(s->getUserData());
         }
     }
 
     namespace explorer {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        auto make(auto &&, Traits<T...>, filesystem::path const &root) {
+        auto make(filesystem::path const &root) {
             return impl::CacheExplorer {.mRoot = root};
         }
 
-        template<typename... T>
-        string_view file(take_ref<impl::CacheExplorer> auto &&v, Traits<T...>, fs::path const &f) {
-            auto &s = static_cast<impl::CacheExplorer &>(v);
+        string_view file(impl::CacheExplorer &s, fs::path const &f) {
             return atOrInsert(s.mCache, f, [&]{ return readFile(s.mRoot / f); });
         }
     }
 
     namespace response {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        void write(take_ref<impl::Response> auto &&v, Traits<T...>, string_view message) {
-            auto &s = static_cast<impl::Response const &>(v);
+        void write(impl::Response s, string_view message) {
             s->write(message);
         }
     }
 
     namespace request {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        string_view url(take_ref<impl::Request> auto &&v, Traits<T...>) {
-            auto &s = static_cast<impl::Request const &>(v);
+        string_view url(impl::Request s) {
             return s->getUrl();
         }
     }
 
     namespace server_callback {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        void get(auto &&e, Traits<T...> traits) {
+        void get(auto &&e) {
             try {
-                response::write(e, traits, explorer::file(e, traits, "RapidControl.html"));
+                response::write(e, explorer::file(e, "RapidControl.html"));
             } catch (exception const &err) {
                 cerr << err.what() << endl;
-                response::write(e, traits, err.what());
+                response::write(e, err.what());
             }
         }
     }
 
     namespace socket {
-        template<typename... TT>
-        auto const *get_user_data(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        auto const *get_user_data(impl::Socket s) {
             return reinterpret_cast<impl::UserData const *>(s->getUserData());
         }
 
-        template<typename... TT>
-        auto *get_mut_user_data(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        auto *get_mut_user_data(impl::Socket s) {
             return reinterpret_cast<impl::UserData *>(s->getUserData());
         }
 
-        template<typename... TT>
-        void send(take_ref<impl::Socket> auto &&v, Traits<TT...>, string_view message) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        void send(impl::Socket s, string_view message) {
             s->send(message);
         }
 
-        template<typename... TT>
-        string address(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
-            auto &s = static_cast<impl::Socket const &>(v);
+        string address(impl::Socket s, Traits<TT...>) {
             return string(s->getRemoteAddressAsText());
         }
     }
 
-
     namespace impl {
-        template<typename T, typename... TT>
-        void systemError(T &&e, Traits<TT...> traits, string_view msg) {
-            socket::send(e, traits, "error: " + string(msg));
+        template<typename T>
+        void systemError(T &&e, string_view msg) {
+            socket::send(e, "error: " + string(msg));
             cerr << "error: " << msg << endl;
         }
     }
 
     namespace socket_callback {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        void open(auto &&e, Traits<T...> traits) {
-            cout << "New connection! " << socket::address(e, traits) << endl;
+        void open(auto &&e) {
+            cout << "New connection! " << socket::address(e) << endl;
         }
 
-        template<typename T, typename... TT>
-        requires implements_v<Default, TT...>
-        void message(T &&e, Traits<TT...> traits, string_view message) {
+        template<typename T>
+        void message(T &&e, string_view message) {
             istringstream iss(string {message});
             string command;
             iss >> command;
@@ -298,25 +245,22 @@ namespace rapid {
             using Command = function<void(istream &)>;
 
             static std::map<string, Command> commands {
-                {"new_user", stream([xe = FWD_CAPTURE(e), traits](string_view m, string_view p){server_request::new_user(xe, traits, m, p);})},
-                {"sign_in", stream([xe = FWD_CAPTURE(e), traits](string_view m, string_view p){server_request::sign_in(xe, traits, m, p);})},
-                {"sign_out", stream([xe = FWD_CAPTURE(e), traits](){server_request::sign_out(xe, traits);})},
+                {"new_user", stream_cmd(server_request::new_user, e)},
+                {"sign_in", stream_cmd(server_request::sign_in, e)},
+                {"sign_out", stream_cmd(server_request::sign_out, e)},
             };
 
             try {
                 commands.at(command)(iss);
             } catch (exception const &) {
-                impl::systemError(e, traits, "error: Cannot parse command - " + command);
+                impl::systemError(e, "error: Cannot parse command - " + command);
             }
         }
     }
 
     namespace server {
-        template<typename... T>
-        requires implements_v<Default, T...>
-        auto start(take_ref<uWS::App> auto &&v, Traits<T...> traits, unsigned port) {
-            auto &s = static_cast<uWS::App &>(v);
-            using UserData = decay_t<decltype(socket::get_user_data(impl::Socket {}, traits))>;
+        auto start(uWS::App &&s, unsigned port) {
+            using UserData = decay_t<decltype(socket::get_user_data(impl::Socket {}))>;
 
             s.get("/*", [&s, traits](impl::Response res, impl::Request req) {
                 server_callback::get(Merge(s, res, req), traits);
