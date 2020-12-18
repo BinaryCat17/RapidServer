@@ -138,7 +138,7 @@ namespace rapid {
     }
 
     namespace user_control {
-        optional<int> new_user(impl::Storage s, Traits<T...>, string_view name, string_view pass) {
+        optional<int> new_user(impl::Storage s, string_view name, string_view pass) {
             using namespace db;
 
             if (isExists(*s, is_equal(&impl::User::name, string(name)))) {
@@ -182,6 +182,81 @@ namespace rapid {
         }
     }
 
+    namespace socket {
+        auto const *get_user_data(impl::Socket s) {
+            return reinterpret_cast<impl::UserData const *>(s->getUserData());
+        }
+
+        auto *get_mut_user_data(impl::Socket s) {
+            return reinterpret_cast<impl::UserData *>(s->getUserData());
+        }
+
+        void send(impl::Socket s, string_view message) {
+            s->send(message);
+        }
+
+        string address(impl::Socket s) {
+            return string(s->getRemoteAddressAsText());
+        }
+    }
+
+    namespace server_response {
+        template<typename T>
+        void new_user(T &&e, Success<string_view> session) {
+            socket::send(e, "newUser success " + string(session.v));
+        }
+
+        template<typename T>
+        void new_user(T &&e, Error<string_view> error) {
+            socket::send(e, "newUser error " + string(error.v));
+        }
+
+        template<typename T>
+        void sign_in(T &&e, Success<string_view> session) {
+            socket::send(e, "signIn success " + string(session.v));
+        }
+
+        template<typename T>
+        void sign_in(T &&e, Error<string_view> error) {
+            socket::send(e, "signIn error " + string(error.v));
+        }
+
+        template<typename T>
+        void sing_out(T &&e) {
+            socket::send(e, "signOut success");
+        }
+    }
+
+    namespace server_request {
+        template<typename T>
+        void new_user(T &&e, string_view login, string_view password) {
+            if (auto user = user_control::new_user(e, login, password)) {
+                *socket::get_mut_user_data(e) = *user;
+            } else {
+                server_response::new_user(e, Error<string_view> {"User already exist!"});
+            }
+        }
+
+        template<typename T>
+        void sign_in(T &&e, string_view login, string_view password) {
+            auto data = socket::get_mut_user_data(e);
+            if (!*data) {
+                server_response::sign_in(e, Error<string_view> {"Already signed in!"});
+                return;
+            }
+            if (auto user = sign_control::sign_in(e, login, password)) {
+                *data = *user;
+            } else {
+                server_response::sign_in(e, Error<string_view> {"Incorrect login or password"});
+            }
+        }
+
+        template<typename T>
+        void sign_out(T &&e) {
+            sign_control::sign_out(e, *socket::get_user_data(e));
+        }
+    }
+
     namespace response {
         void write(impl::Response s, string_view message) {
             s->write(message);
@@ -205,23 +280,6 @@ namespace rapid {
         }
     }
 
-    namespace socket {
-        auto const *get_user_data(impl::Socket s) {
-            return reinterpret_cast<impl::UserData const *>(s->getUserData());
-        }
-
-        auto *get_mut_user_data(impl::Socket s) {
-            return reinterpret_cast<impl::UserData *>(s->getUserData());
-        }
-
-        void send(impl::Socket s, string_view message) {
-            s->send(message);
-        }
-
-        string address(impl::Socket s, Traits<TT...>) {
-            return string(s->getRemoteAddressAsText());
-        }
-    }
 
     namespace impl {
         template<typename T>
@@ -262,14 +320,14 @@ namespace rapid {
         auto start(uWS::App &&s, unsigned port) {
             using UserData = decay_t<decltype(socket::get_user_data(impl::Socket {}))>;
 
-            s.get("/*", [&s, traits](impl::Response res, impl::Request req) {
-                server_callback::get(Merge(s, res, req), traits);
+            s.get("/*", [&s](impl::Response res, impl::Request req) {
+                server_callback::get(s, res, req);
             }).template ws<UserData>("/*", uWS::App::WebSocketBehavior {
-                .open = [&s, traits](impl::Socket ws) {
-                    socket_callback::open(Merge(s, ws), traits);
+                .open = [&s](impl::Socket ws) {
+                    socket_callback::open(s, ws);
                 },
-                .message = [&s, traits](impl::Socket ws, string_view message, uWS::OpCode) {
-                    socket_callback::message(Merge(s, ws), traits, message);
+                .message = [&s](impl::Socket ws, string_view message, uWS::OpCode) {
+                    socket_callback::message(s, ws, message);
                 }
             }).listen("0.0.0.0", port, [](auto *listenSocket) {
                 if (listenSocket) {
