@@ -2,9 +2,14 @@
 #include <sqlite_orm/sqlite_orm.h>
 #include "sqliteUtils.hpp"
 #include "traits.hpp"
+#include <map>
+#include <concepts>
+#include <uWebSockets/App.h>
 
 namespace rapid {
     namespace impl {
+        namespace fs = filesystem;
+
         struct User {
             int id;
             string name;
@@ -41,12 +46,30 @@ namespace rapid {
             int userId;
         };
 
-        auto storage(fs::path const &root, string const &filename) {
+        struct CacheExplorer {
+            fs::path mRoot;
+            std::map<fs::path, string> mCache;
+        };
+
+        using Socket = uWS::WebSocket<false, true> *;
+
+        using Response = uWS::HttpResponse<false> *;
+        using Request = uWS::HttpRequest *;
+        using UserData = optional<int>;
+
+
+    }
+
+    namespace storage {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        auto make(auto &&, Traits<T...>, filesystem::path const &root, string_view filename) {
             using namespace db;
+            using namespace impl;
 
             fs::create_directory(root);
 
-            auto s = make_storage(filename,
+            auto s = make_storage(string(filename),
                 make_table("Users",
                     make_column("Id", &User::id, autoincrement(), primary_key()),
                     make_column("Name", &User::name, unique()),
@@ -73,208 +96,242 @@ namespace rapid {
 
             return s;
         }
+    }
 
-        using namespace db;
+    namespace impl {
+        using Storage = decay_t<decltype(storage::make(storage::Default {},
+            Traits<storage::Default> {}, "", ""))> *;
+    }
 
-        using Storage = decay_t<decltype(storage("", ""))>;
+    namespace sign_control {
+        template<typename... T>
+        optional<int> sign_in(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
+            string_view pass) {
+            auto &s = static_cast<impl::Storage &>(v);
+            if (auto user = getByName<impl::User>(s, string(name))) {
+                if (user->password == pass) {
+                    impl::Session session {.id = -1, .userId = user->id};
+                    return insertTo(s, session);
+                }
+            } else {
+                return {};
+            }
+        }
 
-        using Socket = uWS::WebSocket<false, true> *;
+        template<typename... T>
+        void sign_out(take_ref<impl::Storage> auto &&v, Traits<T...>, int session) {
+            auto &s = static_cast<impl::Storage &>(v);
+            s->remove<impl::Session>(session);
+        }
+    }
 
-        template<typename SocketT, typename StorageT>
-        struct Connection {
-            SocketT socket;
-            StorageT storage;
-        };
+    namespace file_access {
+        template<typename... T>
+        bool can_read_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int user, int file) {
+            auto &s = static_cast<impl::Storage &>(v);
+            using namespace impl;
+            using namespace db;
 
-        struct UserData {
-            int id = -1;
-        };
+            auto groups = select(&UserGroup::groupId,
+                where(is_equal(&UserGroup::userId, user)));
+            auto groupFile = in(&FileAccessGroup::groupId, groups) and
+                is_equal(&FileAccessGroup::fileId, file);
+            auto userFile = in(&FileAccessUser::userId, user) and
+                is_equal(&FileAccessUser::fileId, file);
+            return isExists(*s, groupFile or userFile);
+        }
+
+        template<typename... T>
+        void
+        give_user_access_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int user, int file) {
+            auto &s = static_cast<impl::Storage &>(v);
+            s->insert(impl::FileAccessUser {.fileId = file, .userId = user});
+        }
+
+        template<typename... T>
+        void give_group_access_file(take_ref<impl::Storage> auto &&v, Traits<T...>, int group,
+            int file) {
+            auto &s = static_cast<impl::Storage &>(v);
+            s->insert(impl::FileAccessGroup {.fileId = file, .groupId = group});
+        }
+    }
+
+    namespace user_control {
+        template<typename... T>
+        optional<int> new_user(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
+            string_view password) {
+            auto &s = static_cast<impl::Storage &>(v);
+            using namespace db;
+
+            if (isExists(*s, is_equal(&impl::User::name, string(name)))) {
+                return {};
+            }
+
+            return {s->insert(impl::User {-1, string(name), string(password)})};
+        }
+
+        template<typename... T>
+        optional<int>
+        add_user_group(take_ref<impl::Storage> auto &&v, Traits<T...>, string_view name,
+            string_view password) {
+            auto &s = static_cast<impl::Storage &>(v);
+            using namespace db;
+
+            if (auto user = getByName<impl::User>(s, string(name))) {
+                if (user->password == password) {
+                    return user->id;
+                }
+            } else {
+                return {};
+            }
+        }
+    }
+
+    namespace user_data {
+        template<typename... T>
+        impl::UserData const *get_user_data(take_ref<impl::Socket> auto &&v, Traits<T...>) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            return reinterpret_cast<impl::UserData const *>(s->getUserData());
+        }
+
+        template<typename... T>
+        impl::UserData *get_mut_user_data(take_ref<impl::Socket> auto &&v, Traits<T...>) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            return reinterpret_cast<impl::UserData *>(s->getUserData());
+        }
+    }
+
+    namespace explorer {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        auto make(auto &&, Traits<T...>, filesystem::path const &root) {
+            return impl::CacheExplorer {.mRoot = root};
+        }
+
+        template<typename... T>
+        string_view file(take_ref<impl::CacheExplorer> auto &&v, Traits<T...>, fs::path const &f) {
+            auto &s = static_cast<impl::CacheExplorer &>(v);
+            return atOrInsert(s.mCache, f, [&]{ return readFile(s.mRoot / f); });
+        }
+    }
+
+    namespace response {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        void write(take_ref<impl::Response> auto &&v, Traits<T...>, string_view message) {
+            auto &s = static_cast<impl::Response const &>(v);
+            s->write(message);
+        }
+    }
+
+    namespace request {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        string_view url(take_ref<impl::Request> auto &&v, Traits<T...>) {
+            auto &s = static_cast<impl::Request const &>(v);
+            return s->getUrl();
+        }
+    }
+
+    namespace server_callback {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        void get(auto &&e, Traits<T...> traits) {
+            try {
+                response::write(e, traits, explorer::file(e, traits, "RapidControl.html"));
+            } catch (exception const &err) {
+                cerr << err.what() << endl;
+                response::write(e, traits, err.what());
+            }
+        }
+    }
+
+    namespace socket {
+        template<typename... TT>
+        auto const *get_user_data(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            return reinterpret_cast<impl::UserData const *>(s->getUserData());
+        }
+
+        template<typename... TT>
+        auto *get_mut_user_data(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            return reinterpret_cast<impl::UserData *>(s->getUserData());
+        }
+
+        template<typename... TT>
+        void send(take_ref<impl::Socket> auto &&v, Traits<TT...>, string_view message) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            s->send(message);
+        }
+
+        template<typename... TT>
+        string address(take_ref<impl::Socket> auto &&v, Traits<TT...>) {
+            auto &s = static_cast<impl::Socket const &>(v);
+            return string(s->getRemoteAddressAsText());
+        }
+    }
+
+
+    namespace impl {
+        template<typename T, typename... TT>
+        void systemError(T &&e, Traits<TT...> traits, string_view msg) {
+            socket::send(e, traits, "error: " + string(msg));
+            cerr << "error: " << msg << endl;
+        }
+    }
+
+    namespace socket_callback {
+        template<typename... T>
+        requires implements_v<Default, T...>
+        void open(auto &&e, Traits<T...> traits) {
+            cout << "New connection! " << socket::address(e, traits) << endl;
+        }
+
+        template<typename T, typename... TT>
+        requires implements_v<Default, TT...>
+        void message(T &&e, Traits<TT...> traits, string_view message) {
+            istringstream iss(string {message});
+            string command;
+            iss >> command;
+
+            using Command = function<void(istream &)>;
+
+            static std::map<string, Command> commands {
+                {"new_user", stream([xe = FWD_CAPTURE(e), traits](string_view m, string_view p){server_request::new_user(xe, traits, m, p);})},
+                {"sign_in", stream([xe = FWD_CAPTURE(e), traits](string_view m, string_view p){server_request::sign_in(xe, traits, m, p);})},
+                {"sign_out", stream([xe = FWD_CAPTURE(e), traits](){server_request::sign_out(xe, traits);})},
+            };
+
+            try {
+                commands.at(command)(iss);
+            } catch (exception const &) {
+                impl::systemError(e, traits, "error: Cannot parse command - " + command);
+            }
+        }
     }
 
     namespace server {
-        template<>
-        struct SignControl<impl::Storage> {
-            using session_type = int;
+        template<typename... T>
+        requires implements_v<Default, T...>
+        auto start(take_ref<uWS::App> auto &&v, Traits<T...> traits, unsigned port) {
+            auto &s = static_cast<uWS::App &>(v);
+            using UserData = decay_t<decltype(socket::get_user_data(impl::Socket {}, traits))>;
 
-            static optional<session_type>
-            signIn(impl::Storage &s, string const &name, string const &pass) {
-                if (auto user = getByName<impl::User>(s, name)) {
-                    if (user->password == pass) {
-                        impl::Session session {.id = -1, .userId = user->id};
-                        return insertTo(s, session);
-                    }
-                } else {
-                    return {};
+            s.get("/*", [&s, traits](impl::Response res, impl::Request req) {
+                server_callback::get(Merge(s, res, req), traits);
+            }).template ws<UserData>("/*", uWS::App::WebSocketBehavior {
+                .open = [&s, traits](impl::Socket ws) {
+                    socket_callback::open(Merge(s, ws), traits);
+                },
+                .message = [&s, traits](impl::Socket ws, string_view message, uWS::OpCode) {
+                    socket_callback::message(Merge(s, ws), traits, message);
                 }
-            }
-
-            static void signOut(impl::Storage &e, session_type session) {
-                e.remove<impl::Session>(session);
-            }
-        };
-
-        template<>
-        struct FileAccessControl<impl::Storage> {
-            using user_type = int;
-
-            using group_type = int;
-
-            using file_type = int;
-
-            static bool canReadFile(impl::Storage &storage, user_type user, file_type file) {
-                using namespace impl;
-                auto groups = select(&UserGroup::groupId,
-                    where(is_equal(&UserGroup::userId, user)));
-                auto groupFile = in(&FileAccessGroup::groupId, groups) and
-                    is_equal(&FileAccessGroup::fileId, file);
-                auto userFile = in(&FileAccessUser::userId, user) and
-                    is_equal(&FileAccessUser::fileId, file);
-                return isExists(storage, groupFile or userFile);
-            }
-
-            static void giveUserAccessFile(impl::Storage &storage, user_type user, file_type file) {
-                storage.insert(impl::FileAccessUser {.fileId = file, .userId = user});
-            }
-
-            static void giveGroupAccessFile(impl::Storage &storage, group_type group, file_type file) {
-                storage.insert(impl::FileAccessGroup {.fileId = file, .groupId = group});
-            }
-        };
-
-        template<>
-        struct UserControl<impl::Storage> {
-            using user_type = int;
-
-            static optional<user_type> newUser(impl::Storage &storage, string name, string password) {
-                using namespace db;
-
-                if (isExists(storage, is_equal(&impl::User::name, name))) {
-                    return {};
+            }).listen("0.0.0.0", port, [](auto *listenSocket) {
+                if (listenSocket) {
+                    cout << "Listening for connections..." << endl;
                 }
-
-                return {storage.insert(impl::User {-1, move(name), move(password)})};
-            }
-
-            static optional<user_type>
-            signIn(impl::Storage &s, string const &name, string const &password) {
-                using namespace db;
-
-                if (auto user = getByName<impl::User>(s, name)) {
-                    if (user->password == password) {
-                        return user->id;
-                    }
-                } else {
-                    return {};
-                }
-            }
-        };
-
-
-        template<>
-        struct ServerResponse<impl::Socket> {
-            // newUser success (session)
-            static void newUser(impl::Socket socket, Success <string_view> session) {
-                socket->send("newUser success " + string(session.v));
-            }
-
-            // newUser error(message)
-            static void newUser(impl::Socket socket, Error <string_view> error) {
-                socket->send("newUser error " + string(error.v));
-            }
-
-            // signIn success (session)
-            static void signIn(impl::Socket socket, Success <string_view> session) {
-                socket->send("signIn success " + string(session.v));
-            }
-
-            // signIn error (message)
-            static void signIn(impl::Socket socket, Error <string_view> error) {
-                socket->send("signIn error " + string(error.v));
-            }
-
-            // signOut success
-            static void signOut(impl::Socket socket) {
-                socket->send("signOut success");
-            }
-
-            // connectFarm success (session)
-            static void connectFarm(impl::Socket socket, Success <string_view> session) {
-                socket->send("connectFarm success " + string(session.v));
-            }
-
-            // connectFarm error (message)
-            static void connectFarm(impl::Socket socket, Error <string_view> session) {
-                socket->send("connectFarm error " + string(session.v));
-            }
-        };
-
-        template<typename UserDataT>
-        struct UserDataControl<impl::Socket, UserDataT> {
-            static UserDataT const* getUserData(impl::Socket socket) {
-                return reinterpret_cast<UserDataT const*>(socket->getUserData());
-            }
-
-            static UserDataT* getMutUserData(impl::Socket socket) {
-                return reinterpret_cast<UserDataT*>(socket->getUserData());
-            }
-        };
-
-        template<typename SocketT, typename StorageT>
-        struct ServerRequest<impl::Connection<SocketT, StorageT>> {
-            using Response = ServerResponse<SocketT>;
-            using Storage = UserControl<StorageT>;
-            using Data = UserDataControl<SocketT, impl::UserData>;
-            using SignControl = SignControl<StorageT>;
-            using Connection = impl::Connection<SocketT, StorageT>;
-
-            // newUser (string, string)
-            void newUser(Connection& connection, string_view login, string_view password) {
-                if(auto user = Storage::newUser(connection.storage, login, password)) {
-                    *Data::getMutUserData(connection.socket) = *user;
-                } else {
-                    Response::newUser(Error<string_view>{"User already exist!"});
-                }
-            }
-
-            // signIn (string, string)
-            void signIn(Connection& connection, string_view login, string_view password) {
-                auto data = *Data::getMutUserData(connection.socket);
-                if(*data == -1) {
-                    Response::signIn(Error<string_view>{"Already signed in!"});
-                    return;
-                }
-                if(auto user = SignControl::signIn(connection.storage, login, password)) {
-                    *Data::getMutUserData(connection.socket) = *user;
-                } else {
-                    Response::signIn(Error<string_view>{"Incorrect login or password"});
-                }
-            }
-
-            // signOut
-            void signOut(Connection& connection) {
-                SignControl::signOut(Data::getUserData(connection.socket)->id);
-            }
-        };
-    }
-
-    namespace farm {
-        template<>
-        struct ServerResponse<impl::Socket> {
-            // connectFarm success (session)
-            static void connectFarm(impl::Socket socket, Success<string_view> session) {
-                socket->send("connectFarm success " + string(session.v));
-            }
-
-            // connectFarm error (message)
-            static void connectFarm(impl::Socket socket, Error<string_view> session) {
-                socket->send("connectFarm error " + string(session.v));
-            }
-        };
-
-        template<>
-        struct ServerRequest<impl::Socket> {
-            // connectFarm (string)
-            void connectFarm(string_view farm, string_view farmPassword);
-        };
+            }).run();
+        }
     }
 }

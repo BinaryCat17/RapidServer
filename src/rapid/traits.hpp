@@ -15,91 +15,281 @@ namespace rapid {
         T const &v;
     };
 
-    namespace server {
-        template<typename S>
-        struct SignControl {
-            using session_type = std::nullptr_t;
+    template<typename Trait, typename T = void, typename... Types>
+    struct implements : implements<Trait, Types...> {};
 
-            static optional<session_type> signIn(S e, string_view name, string_view password);
+    template<typename Trait, typename... Types>
+    struct implements<Trait, Trait, Types...> { constexpr static bool value = true; };
 
-            static void signOut(S e, session_type session);
-        };
+    template<typename T>
+    struct implements<T, void> { constexpr static bool value = false; };
 
-        template<typename S>
-        struct FileAccessControl {
-            using user_type = nullptr_t;
+    struct unused_t {};
+    constexpr unused_t unused = unused_t{};
 
-            using group_type = nullptr_t;
+    template<typename... Types>
+    constexpr bool implements_v = implements<Types...>::value;
 
-            using file_type = nullptr_t;
+    template<typename T, typename... Types>
+    struct Merge : Merge<Types...> {
+        explicit Merge(auto &&m, auto &&... args) : Merge<Types...>(args...), v(forward<T>(m)) {}
 
-            static bool canReadFile(S e, user_type user, file_type file);
+        operator T &() { return v; }
 
-            static void addUserAccessFile(S e, user_type user, file_type file);
+        operator T const &() const { return v; }
 
-            static void addGroupAccessFile(S e, group_type group, file_type file);
-        };
+    private:
+        T v;
+    };
 
-        template<typename S>
-        struct UserControl {
-            using user_type = nullptr_t;
+    template<typename T>
+    struct Merge<T> {
+        explicit Merge(auto &&m) : v(forward<T>(m)) {}
 
-            using group_type = nullptr_t;
+        operator T &() { return v; }
 
-            using session_type = nullptr_t;
+        operator T const &() const { return v; }
 
-            static optional<session_type> newUser(S e, string_view name, string_view password);
+    private:
+        T v;
+    };
 
-            static void addUserGroup(S e, user_type user, group_type group);
-        };
+    template<typename... Types, typename... Types2>
+    struct Merge<Merge<Types...>, Types2...> : Merge<Types...>, Merge<Types2...> {
+        explicit Merge(auto &&m, auto &&... args) :
+            Merge<Types2...>(args...), Merge(forward<Merge<Types...>>(m)) {}
+    };
 
-        template<typename T>
-        struct ServerResponse {
-            static void newUser(T e, Success<string_view>);
+    template<typename... Types>
+    Merge(Types...) -> Merge<Types...>;
 
-            static void newUser(T e, Error<string_view>);
+   template<typename... Types, typename... Types2>
+    Merge(Merge<Types...>, Types2...) -> Merge<Merge<Types...>, Types2...>;
 
-            static void signIn(T e, Success<string_view>);
+    template<typename From, typename To>
+    concept take_ref = convertible_to < From const&, To const&>;
 
-            static void signIn(T e, Error<string_view>);
+    template<typename From, typename To>
+    concept take_mut_ref = convertible_to<From &, To &>;
 
-            static void signOut(T e);
+    namespace sign_control {
+        struct Default {};
 
-            static void connectFarm(T e, Success<string_view>);
+        template<typename T, typename... TT>
+        optional<typename T::session_type>
+        sign_in(T &&, Traits<TT...>, Traits<TT...>, string_view /*name*/, string_view /*pass*/) {
+            static_assert((sizeof(T)) == 0, "Trait sign_control::sign_in is not implemented");
+        }
 
-            static void connectFarm(T e, Error<string_view>);
-        };
-
-        template<typename T>
-        struct ServerRequest {
-            static void newUser(T e, string_view login, string_view password);
-
-            static void signIn(T e, string_view login, string_view password);
-
-            static void signOut(T e);
-
-            static void connectFarm(T e, string_view farm, string_view farmPassword);
-        };
-
-        template<typename T, typename UserDataT>
-        struct UserDataControl {
-            static UserDataT const* getUserData(T e);
-
-            static UserDataT* getMutUserData(T e);
-        };
+        template<typename T, typename... TT>
+        void sign_out(T &&, Traits<TT...>, typename T::session_type /*session*/) {
+            static_assert((sizeof(T)) == 0, "Trait sign_control::sign_out is not implemented");
+        }
     }
 
-    namespace farm {
-        template<typename T>
-        struct ServerResponse {
-            static void connectFarm(T e, Success<string_view>);
+    namespace file_access {
+        struct Default {};
 
-            static void connectFarm(T e, Error<string_view>);
-        };
+        template<typename T, typename... TT>
+        bool can_read_file(T &&, Traits<TT...>, typename T::user_type, typename T::file_type) {
+            static_assert((sizeof(T)) == 0, "Trait file_access::can_read_file is not implemented");
+            return {};
+        }
 
-        template<typename T>
-        struct ServerRequest {
-            void connectFarm(string_view farm, string_view farmPassword);
-        };
+        template<typename T, typename... TT>
+        void
+        add_user_access_file(T &&, Traits<TT...>, typename T::user_type, typename T::file_type) {
+            static_assert((sizeof(T)) == 0,
+                "Trait file_access::add_user_access_file is not implemented");
+        }
+
+        template<typename T, typename... TT>
+        void
+        add_group_access_file(T &&, Traits<TT...>, typename T::group_type, typename T::file_type) {
+            static_assert((sizeof(T)) == 0,
+                "Trait file_access::add_group_access_file is not implemented");
+        }
+    }
+
+    namespace user_control {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        auto new_user(T &&, Traits<TT...>, string_view, string_view) {
+            static_assert((sizeof(T)) == 0, "Trait user_control::new_user is not implemented");
+            return 0;
+        }
+
+        template<typename T, typename... TT>
+        void add_user_group(T &&, Traits<TT...>, auto && user, auto && group) {
+            static_assert((sizeof(T)) == 0,
+                "Trait user_control::add_user_group is not implemented");
+        }
+    }
+
+    namespace socket {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        auto get_user_data(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait socket::get_user_data is not implemented");
+            return 0;
+        }
+
+        template<typename T, typename... TT>
+        auto get_mut_user_data(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait socket::get_mut_user_data is not implemented");
+            return 0;
+        }
+
+        template<typename T, typename... TT>
+        void send(T &&, Traits<TT...>, string_view /* message */) {
+            static_assert((sizeof(T)) == 0, "Trait socket::send is not implemented");
+        }
+
+        template<typename T, typename... TT>
+        string address(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait socket::address is not implemented");
+            return {};
+        }
+    }
+
+    namespace server_response {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        void new_user(T &&e, Traits<TT...> t, Success<string_view> session) {
+            socket::send(e, t, "newUser success " + string(session.v));
+        }
+
+        template<typename T, typename... TT>
+        void new_user(T &&e, Traits<TT...> t, Error<string_view> error) {
+            socket::send(e, t, "newUser error " + string(error.v));
+        }
+
+        template<typename T, typename... TT>
+        void sign_in(T &&e, Traits<TT...> s, Success<string_view> session) {
+            socket::send(e, s, "signIn success " + string(session.v));
+        }
+
+        template<typename T, typename... TT>
+        void sign_in(T &&e, Traits<TT...> s, Error<string_view> error) {
+            socket::send(e, s, "signIn error " + string(error.v));
+        }
+
+        template<typename T, typename... TT>
+        void sing_out(T &&e, Traits<TT...> t) {
+            socket::send(e, t, "signOut success");
+        }
+    }
+
+    namespace server_request {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        void new_user(T &&e, Traits<TT...> t, string_view login, string_view password) {
+            if (auto user = user_control::new_user(e, t, login, password)) {
+                *socket::get_mut_user_data(e, t) = *user;
+            } else {
+                server_response::new_user(e, t, Error<string_view> {"User already exist!"});
+            }
+        }
+
+        template<typename T, typename... TT>
+        void sign_in(T &&e, Traits<TT...> t, string_view login, string_view password) {
+            auto data = socket::get_mut_user_data(e, t);
+            if (!*data) {
+                server_response::sign_in(e, Error<string_view> {"Already signed in!"});
+                return;
+            }
+            if (auto user = sign_control::sign_in(e, t, login, password)) {
+                *data = *user;
+            } else {
+                server_response::sign_in(e, t, Error<string_view> {"Incorrect login or password"});
+            }
+        }
+
+        template<typename T, typename... TT>
+        void sign_out(T &&e, Traits<TT...> t) {
+            sign_control::sign_out(e, t, *socket::get_user_data(e));
+        }
+    }
+
+    namespace response {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        void write(T &&, Traits<TT...>, string_view) {
+            static_assert((sizeof(T)) == 0, "Trait response::write is not implemented");
+        }
+    }
+
+    namespace request {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        string_view url(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait request::url is not implemented");
+            return {};
+        }
+    }
+
+    namespace server_callback {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        void get(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait server_callback::get is not implemented");
+        }
+    }
+
+    namespace socket_callback {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        void open(T &&, Traits<TT...>) {
+            static_assert((sizeof(T)) == 0, "Trait socket_callback::open is not implemented");
+        }
+
+        template<typename T, typename... TT>
+        void message(T &&, Traits<TT...>, string_view) {
+            static_assert((sizeof(T)) == 0, "Trait socket_callback::message is not implemented");
+        }
+    }
+
+    namespace explorer {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        auto make(T &&, Traits<TT...>, filesystem::path const &/*root*/) {
+            static_assert((sizeof(T)) == 0, "Trait explorer::make is not implemented");
+            return;
+        }
+
+        template<typename T, typename... TT>
+        string_view file(T &&, Traits<TT...>, fs::path const &) {
+            static_assert((sizeof(T)) == 0, "Trait explorer::file is not implemented");
+            return {};
+        }
+    }
+
+    namespace server {
+        struct Default { constexpr static bool is_trait = true; };
+
+        template<typename T, typename... TT>
+        auto start(T &&, Traits<TT...>, unsigned /*port*/) {
+            static_assert((sizeof(T)) == 0, "Trait server::start is not implemented");
+            return;
+        }
+    }
+
+    namespace storage {
+        struct Default {};
+
+        template<typename T, typename... TT>
+        auto make(T &&, Traits<TT...>, filesystem::path const &, string const &) {
+            static_assert((sizeof(T)) == 0, "Trait storage::make is not implemented");
+            return;
+        }
     }
 }

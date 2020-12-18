@@ -19,7 +19,6 @@ includes = 'src'
 
 lib = static_library('RapidLib',
     'src/rapid/utils.cpp',
-    'src/rapid/file.cpp',
     dependencies : deps,
     include_directories : includes)
 
