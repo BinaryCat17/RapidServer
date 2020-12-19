@@ -55,6 +55,12 @@ namespace rapid {
             int userId;
         };
 
+        struct Farm {
+            int id;
+            int userId;
+            int farmId;
+        };
+
         struct CacheExplorer {
             fs::path mRoot;
             std::map<fs::path, string> mCache;
@@ -66,7 +72,7 @@ namespace rapid {
         using Request = uWS::HttpRequest *;
         struct UserData {
             optional<int> user;
-            optional<int> farm;
+            optional<int> session;
         };
     }
 
@@ -99,7 +105,11 @@ namespace rapid {
                     make_column("UserId", &FileAccessUser::userId)),
                 make_table("Session",
                     make_column("Id", &Session::id, autoincrement(), primary_key()),
-                    make_column("UserId", &Session::userId))
+                    make_column("UserId", &Session::userId)),
+                make_table("Farm",
+                    make_column("Id", &Farm::id, autoincrement(), primary_key()),
+                    make_column("UserId", &Farm::userId),
+                    make_column("FarmId", &Farm::farmId))
             );
 
             return s;
@@ -163,7 +173,9 @@ namespace rapid {
 
         bool add_user_group(impl::Storage s, int user, int group) {
             using namespace db;
-            if (!s->get_optional<impl::Group>(group)) {
+            using namespace impl;
+            if (s->get_all<UserGroup>(where(
+                bitwise_and(is_equal(&UserGroup::userId, user), is_equal(&UserGroup::groupId, group)))).empty()) {
                 s->insert(impl::UserGroup {.userId = user, .groupId = group});
                 return true;
             } else {
@@ -240,30 +252,6 @@ namespace rapid {
             socket::send(socket, "sign_out error " + string(error.v));
         }
 
-        void new_client(impl::Socket socket, Success<string_view> session) {
-            socket::send(socket, "new_client success " + string(session.v));
-        }
-
-        void new_client(impl::Socket socket, Error<string_view> error) {
-            socket::send(socket, "new_client error " + string(error.v));
-        }
-
-        void connect_client(impl::Socket socket, Success<string_view> session) {
-            socket::send(socket, "connect_client success " + string(session.v));
-        }
-
-        void connect_client(impl::Socket socket, Error<string_view> error) {
-            socket::send(socket, "connect_client error " + string(error.v));
-        }
-
-        void disconnect_client(impl::Socket socket) {
-            socket::send(socket, "disconnect_client success");
-        }
-
-        void disconnect_client(impl::Socket socket, Error<string_view> error) {
-            socket::send(socket, "disconnect_client error " + string(error.v));
-        }
-
         void connect_farm(impl::Socket socket, Success<string_view> session) {
             socket::send(socket, "connect_farm success " + string(session.v));
         }
@@ -292,6 +280,10 @@ namespace rapid {
             socket::send(socket, "set_temperature success");
         }
 
+        void set_humidity(impl::Socket socket) {
+            socket::send(socket, "set_humidity success");
+        }
+
         void set_temperature(impl::Socket socket, Error<string_view> error) {
             socket::send(socket, "set_temperature error " + string(error.v));
         }
@@ -314,65 +306,111 @@ namespace rapid {
     }
 
     namespace impl {
-        bool check_farm(auto &&f, impl::Socket socket) {
+        optional<impl::Farm> get_farm(auto &&f, impl::Storage storage, impl::Socket socket) {
             auto data = socket::get_mut_user_data(socket);
 
             if (!socket::is_sign_in(socket)) {
-                f(socket,
-                    Error<string_view> {"Not sign in!"});
-                return false;
+                f(socket, Error<string_view> {"Not sign in!"});
+                return {};
             }
 
-            if (data->farm) {
-                f(socket,
-                    Error<string_view> {"Farm already connected!"});
-                return false;
+            using namespace db;
+            auto farm = storage->get_all<impl::Farm>(
+                where(is_equal(&impl::Farm::userId, *data->user)));
+
+            if (farm.empty()) {
+                f(socket, Error<string_view> {"Farm not found!"});
+                return {};
             }
 
-            return true;
+            return {farm.front()};
+        }
+
+        optional<int> get_farm_session(auto &&f, impl::Storage storage, impl::Socket socket) {
+            using namespace db;
+            if (auto farm = get_farm(f, storage, socket)) {
+                auto session = storage->get_all<impl::Session>(
+                    where(is_equal(&impl::Session::userId, farm->farmId)));
+                if (session.empty()) {
+                    f(socket, Error<string_view> {"Farm not connected!"});
+                    return {};
+                }
+                return { session.front().id };
+            } else {
+                return {};
+            }
+        }
+
+        bool check_farm(auto &&f, impl::Storage storage, impl::Socket socket) {
+            using namespace db;
+            if (auto farm = get_farm(f, storage, socket)) {
+                auto session = storage->get_all<impl::Session>(
+                    where(is_equal(&impl::Session::userId, farm->farmId)));
+
+                if (!session.empty()) {
+                    f(socket, Error<string_view> {"Farm already connected!"});
+                    return false;
+                }
+
+                return true;
+            }
+            return false;
+        }
+
+        int get_user(impl::Storage storage, int session) {
+            using namespace db;
+            return storage->get<impl::Session>(session).userId;
         }
     }
 
     namespace server_request {
-        void
-        connect_farm(impl::Storage storage, impl::Socket socket, string const& id, string const &pass) {
+        void connect_farm(impl::Storage storage, impl::Socket socket, string const &id,
+            string const &pass) {
             auto data = socket::get_mut_user_data(socket);
 
             using namespace impl;
             using namespace db;
 
-            if (!check_farm([](auto &&... a) { server_response::connect_farm(a...); }, socket))
+            if (!check_farm([](auto &&... a) { server_response::connect_farm(a...); }, storage,
+                socket))
                 return;
 
             if (auto session = sign_control::sign_in(storage, "farm_" + id, pass)) {
                 int farmId = storage->get<Session>(*session).userId;
                 int group = getByName<impl::Group>(storage, "farm")->id;
-                if (storage->get_all<impl::UserGroup>(where(is_equal(&UserGroup::userId, farmId) &&
+                if (storage->get_all<impl::UserGroup>(where(
+                    is_equal(&UserGroup::userId, farmId) &&
                     is_equal(&UserGroup::groupId, group))).empty()) {
                     server_response::connect_farm(socket,
                         Error<string_view> {"It is not farm!"});
+                    sign_control::sign_out(storage, *session);
                     return;
                 }
 
                 server_response::connect_farm(socket,
                     Success<string_view> {to_string(*session)});
-                *data->farm = *session;
+                storage->insert(impl::Farm {.userId = *data->user, .farmId = farmId});
             } else {
                 server_response::connect_farm(socket,
                     Error<string_view> {"Incorrect farm login or password"});
             }
         }
 
-        void new_farm(impl::Storage storage, impl::Socket socket, string const& id, string const &pass) {
+        void
+        new_farm(impl::Storage storage, impl::Socket socket, string const &id, string const &pass) {
             auto data = socket::get_mut_user_data(socket);
 
-            if (!impl::check_farm([](auto &&... a) { server_response::new_farm(a...); }, socket))
+            if (!socket::is_sign_in(socket)) {
+                server_response::new_farm(socket, Error<string_view> {"Not sign in!"});
                 return;
+            }
 
             if (auto farm = user_control::new_user(storage, "farm_" + id, pass)) {
-                data->farm = *farm;
+                storage->insert(impl::Farm {.userId = *data->user, .farmId = *farm});
                 int group = getByName<impl::Group>(storage, "farm")->id;
-                user_control::add_user_group(storage, *farm, group);
+                if(!user_control::add_user_group(storage, *farm, group)) {
+                    server_response::new_farm(socket, Error<string_view> {"Farm already exist!!"});
+                }
                 connect_farm(storage, socket, id, pass);
             } else {
                 server_response::new_farm(socket, Error<string_view> {"Farm already exist!"});
@@ -380,26 +418,35 @@ namespace rapid {
         }
 
         void disconnect_farm(impl::Storage storage, impl::Socket socket) {
-            if (!impl::check_farm([](auto &&... a) { server_response::disconnect_farm(a...); },
-                socket))
-                return;
+            auto call = [](auto &&... a) { server_response::disconnect_farm(a...); };
+            auto session = impl::get_farm_session(call, storage, socket);
+            if (!session) return;
 
-            auto userData = socket::get_mut_user_data(socket);
-            sign_control::sign_out(storage, *userData->farm);
-            userData->farm.reset();
-            server_response::disconnect_farm(socket);
+            if (auto farm = impl::get_farm([](auto &&... a) {
+                server_response::disconnect_farm(a...);
+            }, storage, socket)) {
+                sign_control::sign_out(storage, farm->farmId);
+                storage->remove<impl::Session>(*session);
+                server_response::disconnect_farm(socket);
+            }
         }
 
-        void set_temperature(impl::Storage s, impl::Socket e, float temperature) {
-
+        void set_temperature(uWS::App &app, float temperature) {
+            app.publish("arduino", "set_temperature " + to_string(temperature), uWS::OpCode::TEXT);
         }
 
-        void set_light_interval(impl::Storage s, impl::Socket e, int start, int end) {
-
+        void set_humidity(uWS::App &app, float temperature) {
+            app.publish("arduino", "set_humidity " + to_string(temperature), uWS::OpCode::TEXT);
         }
 
-        void set_pump_interval(impl::Storage s, impl::Socket e, int start, int end) {
+        void set_light_interval(uWS::App &app, int start, int end) {
+            app.publish("arduino", "set_light_interval " + to_string(start) + " " + to_string(end),
+                uWS::OpCode::TEXT);
+        }
 
+        void set_pump_interval(uWS::App &app, int start, int end) {
+            app.publish("arduino", "set_pump_interval " + to_string(start) + " " + to_string(end),
+                uWS::OpCode::TEXT);
         }
 
         void sign_in(impl::Storage storage, impl::Socket socket, string const &login,
@@ -411,8 +458,8 @@ namespace rapid {
             }
             if (auto session = sign_control::sign_in(storage, login, password)) {
                 server_response::sign_in(socket, Success<string_view> {to_string(*session)});
-                *data->user = *session;
-                socket->subscribe("client");
+                data->user.emplace(impl::get_user(storage, *session));
+                data->session.emplace(*session);
             } else {
                 server_response::sign_in(socket,
                     Error<string_view> {"Incorrect login or password"});
@@ -427,7 +474,6 @@ namespace rapid {
             }
 
             if (auto user = user_control::new_user(storage, login, password)) {
-                socket::get_mut_user_data(socket)->user = *user;
                 sign_in(storage, socket, login, password);
             } else {
                 server_response::new_user(socket, Error<string_view> {"User already exist!"});
@@ -437,19 +483,17 @@ namespace rapid {
         void sign_out(impl::Storage storage, impl::Socket socket) {
             if (socket::is_sign_in(socket)) {
                 auto userData = socket::get_mut_user_data(socket);
-                if (userData->farm) {
+                if (impl::get_farm([](auto &&...) {}, storage, socket)) {
                     disconnect_farm(storage, socket);
                 }
-                sign_control::sign_out(storage, *userData->user);
+                sign_control::sign_out(storage, *userData->session);
                 userData->user.reset();
+                userData->session.reset();
                 server_response::sign_out(socket);
-                socket->unsubscribe("client");
             } else {
                 server_response::sign_out(socket, Error<string_view> {"Not signed in yet!"});
             }
         }
-
-
     }
 
     namespace response {
@@ -509,6 +553,10 @@ namespace rapid {
                 {"new_user", cmd<string, string>(curry(server_request::new_user, storage, e))},
                 {"sign_in", cmd<string, string>(curry(server_request::sign_in, storage, e))},
                 {"sign_out", cmd(curry(server_request::sign_out, storage, e))},
+                {"new_farm", cmd<string, string>(curry(server_request::new_farm, storage, e))},
+                {"connect_farm",
+                    cmd<string, string>(curry(server_request::connect_farm, storage, e))},
+                {"disconnect_farm", cmd(curry(server_request::disconnect_farm, storage, e))},
             };
 
             try {
