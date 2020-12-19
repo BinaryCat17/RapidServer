@@ -5,34 +5,33 @@
 #include <vector>
 #include <filesystem>
 #include <string>
-#include "./curry.hpp"
 
 namespace rapid {
     using namespace std;
     namespace fs = std::filesystem;
 
-//    template<typename FnT, typename... Types>
-//    auto curry(FnT &&f, Types &&... values) {
-//        return [&](auto &&... args) {
-//            return f(values..., args...);
-//        };
-//    }
-//
-//    template<typename FnT>
-//    auto curry(FnT &&f) {
-//        return [&](auto &&... args) {
-//            return curry(f, args...);
-//        };
-//    }
+    template<typename FnT, typename... Types>
+    auto curry(FnT &&f, Types &&... values) {
+        return [&](auto &&... args) {
+            return f(values..., args...);
+        };
+    }
 
-    template<typename R, typename T>
+    template<typename FnT>
+    auto curry(FnT &&f) {
+        return [&](auto &&... args) {
+            return curry(f, args...);
+        };
+    }
+
+    template<typename T, typename R>
     auto doStream(function<R(T)> f, istream &is) {
         decay_t<T> val;
         is >> val;
         return f(val);
     }
 
-    template<typename R, typename T, typename... Types>
+    template<typename T, typename... Types, typename R>
     auto doStream(function<R(T, Types...)> f, istream &is) {
         decay_t<T> val;
         is >> val;
@@ -40,9 +39,22 @@ namespace rapid {
         return doStream(function<R(Types...)>(f2(val)), is);
     }
 
-    template<typename FnT>
-    auto stream(FnT &&f) {
-        return curry<FnT>(doStream)(forward<FnT>(f));
+    template<typename... Types>
+    auto stream(function<void(Types...)> f) {
+        return [f](istream&is) {
+            return doStream(f, is);
+        };
+    }
+
+    inline auto stream(function<void()> f) {
+        return [f](istream&) {
+            return f();
+        };
+    }
+
+    template<typename... Types, typename FnT>
+    auto cmd(FnT && f) {
+        return stream(function<void(Types...)>(f));
     }
 
     template<typename T = void, typename... Types>
@@ -50,11 +62,6 @@ namespace rapid {
 
     template<>
     struct Traits<void> {};
-
-    template<typename FnT, typename T, typename... TT>
-    auto stream_cmd(FnT && f, T && v) {
-        return stream(curry(f)(v));
-    }
 
     template<typename Cont, typename VT, typename FnT>
     auto const &atOrInsert(Cont &c, VT const &v, FnT &&f) {
