@@ -309,6 +309,14 @@ namespace rapid {
         void set_pump_interval(impl::Socket socket, Error<string_view> error) {
             socket::send(socket, "set_pump_interval error " + string(error.v));
         }
+
+        void set_time(impl::Socket socket) {
+            socket::send(socket, "set_time success");
+        }
+
+        void set_time_interval(impl::Socket socket, Error<string_view> error) {
+            socket::send(socket, "set_time_interval error " + string(error.v));
+        }
     }
 
     namespace impl {
@@ -332,43 +340,12 @@ namespace rapid {
             return {farm.front()};
         }
 
-//        optional<int> get_farm_session(auto &&f, impl::Storage storage, impl::Socket socket) {
-//            using namespace db;
-//            if (auto farm = get_farm(f, storage, socket)) {
-//                auto session = storage->get_all<impl::Session>(
-//                    where(is_equal(&impl::Session::userId, farm->farmId)));
-//                if (session.empty()) {
-//                    f(socket, Error<string_view> {"Farm not connected!"});
-//                    return {};
-//                }
-//                return { session.front().id };
-//            } else {
-//                return {};
-//            }
-//        }
-//
-//        bool check_farm(auto &&f, impl::Storage storage, impl::Socket socket) {
-//            using namespace db;
-//            if (auto farm = get_farm(f, storage, socket)) {
-//                auto session = storage->get_all<impl::Session>(
-//                    where(is_equal(&impl::Session::userId, farm->farmId)));
-//
-//                if (!session.empty()) {
-//                    f(socket, Error<string_view> {"Farm already connected!"});
-//                    return false;
-//                }
-//
-//                return true;
-//            }
-//            return false;
-//        }
-
         void
         send_message_to_farm(auto &&f, uWS::App &app, impl::Socket socket, string_view message) {
             auto data = socket::get_user_data(socket);
             if (socket::is_sign_in(socket)) {
                 if (data->farmSession) {
-                    app.publish("arduino_" + to_string(*data->farmSession), message,
+                    app.publish("client_" + to_string(*data->user), message,
                         uWS::OpCode::TEXT);
                     f(socket);
                 } else {
@@ -499,9 +476,17 @@ namespace rapid {
                 "set_pump_interval " + to_string(start) + " " + to_string(end));
         }
 
+        void set_time(uWS::App &app, impl::Socket socket, int time) {
+            auto call = [](auto &&... a) { server_response::set_pump_interval(a...); };
+            impl::send_message_to_farm(call, app, socket,
+                "set_time " + to_string(time));
+        }
+
         void sign_in(impl::Storage storage, impl::Socket socket, string const &login,
             string const &password) {
             auto data = socket::get_mut_user_data(socket);
+            using namespace impl;
+            using namespace db;
             if (data->user) {
                 server_response::sign_in(socket, Error<string_view> {"Already signed in!"});
                 return;
@@ -511,9 +496,16 @@ namespace rapid {
                 data->user.emplace(impl::get_user(storage, *session));
                 data->session.emplace(*session);
                 if (impl::is_farm([](auto &&...) {}, storage, socket, *data->user)) {
-                    socket->subscribe("arduino_" + to_string(*session));
+                    auto farm = storage->get_all<Farm>(
+                        where(is_equal(&Farm::farmId, *data->user))).front();
+                    socket->subscribe("client_" + to_string(farm.userId));
+
                 } else {
-                    socket->subscribe("client_" + to_string(*session));
+                    auto farms = storage->get_all<Farm>(
+                        where(is_equal(&Farm::userId, *data->user)));
+                    for (Farm farm : farms) {
+                        socket->subscribe("farm_" + to_string(farm.farmId));
+                    }
                 }
             } else {
                 server_response::sign_in(socket,
@@ -590,11 +582,21 @@ namespace rapid {
             socket::send(e, "error: " + string(msg));
             cerr << "error: " << msg << endl;
         }
+
+        std::string current_time_and_date() {
+            auto now = std::chrono::system_clock::now();
+            auto in_time_t = std::chrono::system_clock::to_time_t(now);
+
+            std::stringstream ss;
+            ss << std::put_time(std::localtime(&in_time_t), "%Y %m %d %H %M %S");
+            return ss.str();
+        }
     }
 
     namespace socket_callback {
         void open(impl::Socket e) {
             cout << "New connection! " << socket::address(e) << endl;
+            socket::send(e, "set_time " + impl::current_time_and_date());
         }
 
         void message(uWS::App &app, impl::Storage storage, impl::Socket e, string_view message) {
@@ -629,7 +631,7 @@ namespace rapid {
                     cout << "Command from farm: " << message << endl;
                     auto farm = storage->get_all<Farm>(where(is_equal(&Farm::farmId, *user)));
                     auto client = farm.front();
-                    app.publish("client_" + to_string(client.userId), message, uWS::OpCode::TEXT);
+                    app.publish("farm_" + to_string(client.farmId), message, uWS::OpCode::TEXT);
                 } else {
                     cout << "Command from client: " << endl;
                     commands.at(command)(iss);
